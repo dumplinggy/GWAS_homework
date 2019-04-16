@@ -1,0 +1,96 @@
+###Priest Lab Interview Homework###
+###Part 2###
+ssh gzq0002@hopper.auburn.edu
+cd homework
+module load plink/1.90
+module load R/3.5.1
+
+### a) Can you make a histogram showing the distribution of missing values per individual? And a histogram with number of missing values per marker? ### 
+# Investigate missingness per individual and per SNP and make histograms.
+plink --bfile anhwdata --missing
+more plink.imiss
+more plink.lmiss
+# Generate plots to visualize the missingness results.
+R
+indmiss<-read.table(file="plink.imiss", header=TRUE)
+snpmiss<-read.table(file="plink.lmiss", header=TRUE)
+pdf("histimiss.pdf") #indicates pdf format and gives title to file
+hist(indmiss[,6],main="Histogram individual missingness") #selects column 6, names header of file
+pdf("histlmiss.pdf") 
+hist(snpmiss[,5],main="Histogram SNP missingness")  
+dev.off() # shuts down the current device
+
+### b) In the dataset, some individuals come from the same families. Find which individuals come from the same family, and determine which subjects need to be excluded. (Hint: you can estimate identity-by-descent and filter subjects based on a pi_hat threshold.)###
+# The parameters ë50 5 0.2í stand respectively for: the window size, the number of SNPs to shift the window at each step, and the multiple correlation coefficient for a SNP being regressed on all other SNPs simultaneously.
+plink --bfile anhwdata --indep-pairwise 50 5 0.2 --out indepSNP
+plink --bfile anhwdata --extract indepSNP.prune.in --het --out R_check
+R
+het <- read.table("R_check.het", head=TRUE)
+het$HET_RATE = (het$"N.NM." - het$"O.HOM.")/het$"N.NM."
+het_fail = subset(het, (het$HET_RATE < mean(het$HET_RATE)-3*sd(het$HET_RATE)) | (het$HET_RATE > mean(het$HET_RATE)+3*sd(het$HET_RATE)));
+het_fail$HET_DST = (het_fail$HET_RATE-mean(het$HET_RATE))/sd(het$HET_RATE);
+write.table(het_fail, "het-fail-qc.txt", row.names=FALSE)
+# Adapt this file to make it compatible for PLINK, by removing all quotation marks from the file and selecting only the first two columns.
+sed 's/"// g' het-fail-qc.txt | awk '{print$1, $2}'> het_fail_ind.txt
+# Remove heterozygosity rate outliers.
+plink --bfile anhwdata --remove het_fail_ind.txt --make-bed --out anhwdata1
+# Assuming a random population sample we are going to exclude all individuals above the pihat threshold of 0.2. 
+# Check for relationships between individuals with a pihat > 0.2.
+plink --bfile anhwdata1 --filter-founders --make-bed --out anhwdata2
+plink --bfile anhwdata2 --extract indepSNP.prune.in --genome --min 0.2 --out pihat_min0.2_in_founders
+
+### c) Run a genetic association test (a.k.a. GWAS) using CAD as outcome. Justify which covariates you include in the analysis (if any), and apply filtering criteria to samples and markers (e.g., missingness, Hardy-Weinberg equilibrium).###
+# Delete SNPs with missingness >0.2.
+plink --bfile anhwdata2 --geno 0.2 --make-bed --out anhwdata3
+# Delete individuals with missingness >0.2.
+plink --bfile anhwdata3 --mind 0.2 --make-bed --out anhwdata4
+# Generate a bfile with autosomal SNPs only and delete SNPs with a low minor allele frequency (MAF).
+# Select autosomal SNPs only (i.e., from chromosomes 1 to 22).
+awk '{ if ($1 >= 1 && $1 <= 22) print $2 }' anhwdata.bim > snp_1_22.txt
+plink --bfile anhwdata4 --extract snp_1_22.txt --make-bed --out anhwdata5
+# Remove SNPs with a low MAF frequency.
+plink --bfile anhwdata5 --maf 0.05 --make-bed --out anhwdata6
+# Check the distribution of HWE p-values of all SNPs.
+plink --bfile anhwdata6 --hardy
+# Selecting SNPs with HWE p-value below 0.00001.
+awk '{ if ($9 <0.00001) print $0 }' plink.hwe>plinkzoomhwe.hwe
+# use a stringent HWE threshold for controls, followed by a less stringent threshold for the case data.
+plink --bfile anhwdata6 --hwe 1e-6 --make-bed --out anhwdata6_hwe_filter_step1
+# Second HWE step only focusses on cases because in the controls all SNPs with a HWE p-value < hwe 1e-6 were already removed
+plink --bfile anhwdata6_hwe_filter_step1 --hwe 1e-10 --hwe-all --make-bed --out anhwdata7
+
+# assoc does not allow to correct covariates
+plink --bfile anhwdata7 --assoc --out assoc_results
+# logistic allow 7 principal components as covariates
+plink --bfile anhwdata7 --covar anhwdata.cov --covar-number 1,2,5,6,7,9,10 --logistic --hide-covar --out logistic_results
+# Remove NA values, those might give problems generating plots in later steps.
+awk '!/'NA'/' logistic_results.assoc.logistic > logistic_results.assoc_2.logistic
+
+### d) Make manhattan and qq plots for your results. Is there genomic inflation? What else can you tell us from these plots?###
+# Multiple testing
+# There are various way to deal with multiple testing outside of the conventional genome-wide significance threshold of 5.0E-8, below we present a couple. 
+#adjust
+plink --bfile anhwdata7 --covar anhwdata.cov --covar-number 1,2,5,6,7,9,10 --logistic --hide-covar --adjust --out logistic_results
+# This file gives a Bonferroni corrected p-value, along with FDR and others.
+R
+install.packages("qqman",repos="http://cran.cnr.berkeley.edu/",lib="~" ) # location of installation can be changed but has to correspond with the library location 
+library("qqman",lib.loc="~")  
+results_log <- read.table("logistic_results.assoc_2.logistic", head=TRUE)
+jpeg("Logistic_manhattan.jpeg")
+manhattan(results_log,chr="CHR",bp="BP",p="P",snp="SNP", main = "Manhattan plot: logistic")
+dev.off()
+results_as <- read.table("assoc_results.assoc", head=TRUE)
+jpeg("assoc_manhattan.jpeg")
+manhattan(results_as,chr="CHR",bp="BP",p="P",snp="SNP", main = "Manhattan plot: assoc")
+dev.off() 
+results_log <- read.table("logistic_results.assoc_2.logistic", head=TRUE)
+jpeg("QQ-Plot_logistic.jpeg")
+qq(results_log$P, main = "Q-Q plot of GWAS p-values : log")
+dev.off()
+results_as <- read.table("assoc_results.assoc", head=TRUE)
+jpeg("QQ-Plot_assoc.jpeg")
+qq(results_as$P, main = "Q-Q plot of GWAS p-values : log")
+dev.off()
+
+
+
